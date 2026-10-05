@@ -4,6 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 from server import app
 from wokao.db import crud as database
+from wokao.db.models import init_db
+from wokao.db.session import get_connection
 
 
 client = TestClient(app)
@@ -113,3 +115,118 @@ def test_user_llm_test_endpoint_validation():
     assert bad_conn.status_code == 400
     assert bad_conn.json()["success"] is False
     assert "连接失败" in bad_conn.json()["msg"]
+
+
+def _register(client, tag):
+    ts = int(time.time() * 1000)
+    resp = client.post("/api/auth/register", json={"username": f"multi_{tag}_{ts}", "password": "password123"})
+    return resp.json()["token"], resp.json()["user_id"]
+
+
+def test_multi_config_save_switch_and_delete():
+    """多套配置：同名覆盖、保存即启用、一键切换、单删后自动补位激活。"""
+    token, _ = _register(client, "a")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 第一套：DeepSeek 主力
+    r1 = client.post("/api/user/llm_config", headers=headers, json={
+        "name": "主力", "provider": "deepseek", "model_name": "deepseek-chat",
+        "api_key": "sk-primary-key-123456", "base_url": "https://api.deepseek.com/v1", "is_active": 1,
+    })
+    assert r1.status_code == 200 and r1.json()["name"] == "主力"
+
+    # 第二套：智谱备用（保存即切换为激活）
+    r2 = client.post("/api/user/llm_config", headers=headers, json={
+        "name": "备用", "provider": "zhipu", "model_name": "glm-5.2",
+        "api_key": "sk-backup-key-654321", "base_url": "https://open.bigmodel.cn/api/paas/v4", "is_active": 1,
+    })
+    assert r2.status_code == 200
+    configs = r2.json()["configs"]
+    assert len(configs) == 2
+    active = next(c for c in configs if c["is_active"])
+    assert active["name"] == "备用"
+    # 返回体全部脱敏（掩码保留前 4 位属正常，独有尾段不得泄露）
+    assert all("123456" not in c["api_key_masked"] for c in configs)
+    assert all("654321" not in c["api_key_masked"] for c in configs)
+
+    # 一键切回主力
+    r3 = client.post("/api/user/llm_config/activate", headers=headers, json={"name": "主力"})
+    assert r3.status_code == 200
+    active = next(c for c in r3.json()["configs"] if c["is_active"])
+    assert active["name"] == "主力"
+    assert client.get("/api/user/llm_config", headers=headers).json()["config"]["name"] == "主力"
+
+    # 单删激活套后，剩余配置自动补位激活
+    r4 = client.delete("/api/user/llm_config", headers=headers, params={"name": "主力"})
+    assert r4.status_code == 200
+    configs = r4.json()["configs"]
+    assert len(configs) == 1 and configs[0]["name"] == "备用" and configs[0]["is_active"] == 1
+
+    # 清空全部 → 恢复默认
+    r5 = client.delete("/api/user/llm_config", headers=headers)
+    assert r5.status_code == 200
+    assert client.get("/api/user/llm_config", headers=headers).json()["configured"] is False
+
+
+def test_llm_config_name_defaults_and_masked_key_reuse():
+    """不传 name 自动命名；保存时 Key 传掩码则沿用已存密钥。"""
+    token, _ = _register(client, "b")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    r1 = client.post("/api/user/llm_config", headers=headers, json={
+        "provider": "deepseek", "model_name": "deepseek-chat", "api_key": "sk-auto-name-123456",
+    })
+    assert r1.status_code == 200
+    name = r1.json()["name"]
+    assert "deepseek" in name and "deepseek-chat" in name
+
+    # 同名再保存，Key 传掩码 → 沿用旧密钥
+    r2 = client.post("/api/user/llm_config", headers=headers, json={
+        "name": name, "provider": "deepseek", "model_name": "deepseek-reasoner",
+        "api_key": "sk-****key-******", "base_url": "https://api.deepseek.com/v1",
+    })
+    assert r2.status_code == 200
+    db_cfg = database.get_user_llm_config(_uid_of(client, headers))
+    assert db_cfg["api_key"] == "sk-auto-name-123456"
+    assert db_cfg["model_name"] == "deepseek-reasoner"
+
+
+def _uid_of(client, headers):
+    return client.get("/api/me", headers=headers).json()["user_id"]
+
+
+def test_legacy_single_config_table_migrates():
+    """旧版单配置表（user_id 主键）在 init_db 时自动迁移为多配置格式并保持激活。"""
+    token, user_id = _register(client, "legacy")
+    conn = get_connection()
+    conn.execute("DROP TABLE user_llm_configs")
+    conn.execute(
+        """
+        CREATE TABLE user_llm_configs (
+            user_id INTEGER PRIMARY KEY,
+            provider TEXT DEFAULT 'custom',
+            model_name TEXT NOT NULL,
+            api_key TEXT NOT NULL,
+            base_url TEXT DEFAULT '',
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO user_llm_configs (user_id, provider, model_name, api_key, base_url, is_active) "
+        "VALUES (?, 'deepseek', 'deepseek-chat', ?, 'https://api.deepseek.com/v1', 1)",
+        (user_id, "sk-legacy-key-123456"),
+    )
+    conn.commit()
+    conn.close()
+
+    init_db()
+    cfg = database.get_user_llm_config(user_id)
+    assert cfg is not None
+    assert cfg["name"] == "deepseek 配置"
+    assert cfg["is_active"] == 1
+    assert cfg["api_key"] == "sk-legacy-key-123456"
+    assert cfg["model_name"] == "deepseek-chat"

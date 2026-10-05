@@ -175,22 +175,58 @@ def init_db() -> None:
             """
         )
 
-        # 用户自定义 LLM 模型配置表（BYOK）
+        # 用户自定义 LLM 模型配置表（BYOK，多配置：一人多套、单套激活）
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_llm_configs (
-                user_id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
                 provider TEXT DEFAULT 'custom',
                 model_name TEXT NOT NULL,
                 api_key TEXT NOT NULL,
                 base_url TEXT DEFAULT '',
-                is_active INTEGER DEFAULT 1,
+                is_active INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE (user_id, name)
             )
             """
         )
+
+        # 旧版单配置表（user_id 单主键、无 name 列）迁移：原配置保留为一套同名激活配置
+        legacy_cols = [r["name"] for r in conn.execute("PRAGMA table_info(user_llm_configs)").fetchall()]
+        if "name" not in legacy_cols:
+            conn.execute("ALTER TABLE user_llm_configs RENAME TO user_llm_configs_legacy")
+            conn.execute(
+                """
+                CREATE TABLE user_llm_configs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    provider TEXT DEFAULT 'custom',
+                    model_name TEXT NOT NULL,
+                    api_key TEXT NOT NULL,
+                    base_url TEXT DEFAULT '',
+                    is_active INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    UNIQUE (user_id, name)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO user_llm_configs
+                    (user_id, name, provider, model_name, api_key, base_url, is_active, created_at, updated_at)
+                SELECT user_id, provider || ' 配置', provider, model_name, api_key, base_url,
+                       1, created_at, updated_at
+                FROM user_llm_configs_legacy
+                """
+            )
+            conn.execute("DROP TABLE user_llm_configs_legacy")
 
         # 用户档案全量字段迁移
         user_cols = {

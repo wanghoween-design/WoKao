@@ -62,11 +62,16 @@ class UserProfileUpdateRequest(BaseModel):
 
 
 class UserLLMConfigRequest(BaseModel):
+    name: Optional[str] = Field(default="", max_length=64)
     provider: str = Field(default="custom", max_length=50)
     model_name: str = Field(min_length=1, max_length=200)
     api_key: str = Field(min_length=1, max_length=500)
     base_url: Optional[str] = Field(default="", max_length=500)
     is_active: int = Field(default=1, ge=0, le=1)
+
+
+class LLMConfigActivateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
 
 
 class TestLLMConfigRequest(BaseModel):

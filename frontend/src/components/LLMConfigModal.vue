@@ -1,6 +1,6 @@
 <script setup>
 import { ref, reactive, watch, onMounted } from 'vue'
-import { getUserLLMConfig, saveUserLLMConfig, deleteUserLLMConfig, testUserLLMConfig } from '../api/client.js'
+import { getUserLLMConfig, saveUserLLMConfig, activateUserLLMConfig, deleteUserLLMConfig, testUserLLMConfig } from '../api/client.js'
 
 const props = defineProps({
   show: { type: Boolean, default: false }
@@ -8,53 +8,68 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'saved'])
 
-// 服务商预置列表
+// 服务商预置列表：baseUrl 自动填充，keyUrl 是申请密钥的入口
 const PROVIDERS = [
   {
     id: 'deepseek',
     name: 'DeepSeek (深度求索)',
     baseUrl: 'https://api.deepseek.com/v1',
     models: ['deepseek-chat', 'deepseek-reasoner'],
-    hint: '支持 deepseek-chat (V3) 与 deepseek-reasoner (R1 推理模型)'
+    keyUrl: 'https://platform.deepseek.com',
+    hint: 'deepseek-chat (V3) 与 deepseek-reasoner (R1 推理模型)'
   },
   {
     id: 'dashscope',
-    name: '阿里云通义千问 / 百炼 (DashScope)',
+    name: '通义千问 Qwen (阿里云百炼)',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     models: ['qwen-plus', 'qwen-max', 'qwen-turbo'],
-    hint: '推荐使用通义千问 qwen-plus 或 qwen-max'
+    keyUrl: 'https://bailian.console.aliyun.com',
+    hint: '阿里云百炼开通「模型服务」后即可调用'
   },
   {
     id: 'zhipu',
-    name: '智谱 AI / 清言 GLM',
+    name: '智谱 GLM',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-4-flash', 'glm-4-plus'],
-    hint: '支持 glm-4-flash (高速) 与 glm-4-plus'
+    models: ['glm-5.2', 'glm-4-flash', 'glm-4-plus'],
+    keyUrl: 'https://open.bigmodel.cn',
+    hint: 'glm-4-flash 免费额度较多，适合先试水'
+  },
+  {
+    id: 'doubao',
+    name: '豆包 (火山方舟 Ark)',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    models: ['doubao-seed-1.6', 'doubao-1.5-pro-32k'],
+    keyUrl: 'https://console.volcengine.com/ark',
+    hint: '填模型名或你的推理接入点 ID (ep-开头)；Key 在火山方舟控制台申请'
   },
   {
     id: 'siliconflow',
     name: '硅基流动 (SiliconFlow)',
     baseUrl: 'https://api.siliconflow.cn/v1',
     models: ['Qwen/Qwen2.5-7B-Instruct', 'deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1'],
-    hint: '全托管开源大模型 API 平台'
+    keyUrl: 'https://cloud.siliconflow.cn',
+    hint: '开源模型聚合平台，部分小模型免费'
   },
   {
     id: 'openai',
     name: 'OpenAI 官方',
     baseUrl: 'https://api.openai.com/v1',
     models: ['gpt-4o-mini', 'gpt-4o'],
+    keyUrl: 'https://platform.openai.com',
     hint: '需国际网络环境与 OpenAI API Key'
   },
   {
     id: 'custom',
-    name: '自定义 OpenAI 兼容 API (Ollama / OneAPI 等)',
+    name: '自定义 OpenAI 兼容接口 (Ollama / OneAPI 等)',
     baseUrl: '',
     models: ['gpt-4o-mini', 'deepseek-chat', 'qwen-plus'],
-    hint: '支持填写任何兼容 OpenAI 接口协议的服务地址'
+    keyUrl: '',
+    hint: '任何兼容 OpenAI 接口协议的服务地址都可以'
   }
 ]
 
 const form = reactive({
+  name: '',
   provider: 'deepseek',
   model_name: 'deepseek-chat',
   api_key: '',
@@ -65,6 +80,8 @@ const form = reactive({
 const showPassword = ref(false)
 const isConfigured = ref(false)
 const maskedKey = ref('')
+const configs = ref([])          // 已保存的全部配置（脱敏）
+const editingName = ref('')      // 非空 = 正在编辑这套已有配置
 const loading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
@@ -72,12 +89,20 @@ const testResult = ref(null)
 const msg = ref('')
 const error = ref('')
 
+function providerOf(id) {
+  return PROVIDERS.find(item => item.id === id)
+}
+
 function onProviderChange() {
-  const p = PROVIDERS.find(item => item.id === form.provider)
+  const p = providerOf(form.provider)
   if (p) {
     if (p.baseUrl) form.base_url = p.baseUrl
     if (p.models && p.models.length > 0 && !p.models.includes(form.model_name)) {
       form.model_name = p.models[0]
+    }
+    // 新建时配置名跟随服务商；编辑已有配置时保持原名
+    if (!editingName.value && !form.name.trim()) {
+      form.name = p.name.split(' (')[0]
     }
   }
   testResult.value = null
@@ -88,6 +113,33 @@ function selectModel(m) {
   form.model_name = m
 }
 
+function resetForm() {
+  editingName.value = ''
+  form.name = ''
+  form.provider = 'deepseek'
+  form.model_name = 'deepseek-chat'
+  form.api_key = ''
+  form.base_url = 'https://api.deepseek.com/v1'
+  form.is_active = 1
+  maskedKey.value = ''
+  isConfigured.value = false
+  testResult.value = null
+}
+
+function applyConfigToForm(cfg) {
+  editingName.value = cfg.name
+  form.name = cfg.name
+  form.provider = cfg.provider || 'custom'
+  form.model_name = cfg.model_name || ''
+  form.base_url = cfg.base_url || ''
+  form.api_key = ''
+  maskedKey.value = cfg.api_key_masked || ''
+  isConfigured.value = true
+  testResult.value = null
+  error.value = ''
+  msg.value = ''
+}
+
 async function loadConfig() {
   loading.value = true
   error.value = ''
@@ -95,34 +147,52 @@ async function loadConfig() {
   testResult.value = null
   try {
     const data = await getUserLLMConfig()
+    configs.value = data.configs || []
     if (data.configured && data.config) {
-      isConfigured.value = true
-      form.provider = data.config.provider || 'custom'
-      form.model_name = data.config.model_name || ''
-      form.base_url = data.config.base_url || ''
-      form.is_active = data.config.is_active !== undefined ? data.config.is_active : 1
-      maskedKey.value = data.config.api_key_masked || ''
-      form.api_key = ''
+      applyConfigToForm(data.config)
     } else {
-      isConfigured.value = false
-      maskedKey.value = ''
-      form.provider = 'deepseek'
-      onProviderChange()
+      resetForm()
     }
   } catch (e) {
     // 加载失败按未配置处理，用户可重新填写保存
+    resetForm()
   } finally {
     loading.value = false
   }
 }
 
-watch(() => props.show, (val) => {
-  if (val) loadConfig()
-})
+async function doActivate(name) {
+  error.value = ''
+  msg.value = ''
+  try {
+    const res = await activateUserLLMConfig(name)
+    configs.value = res.configs || []
+    const active = (res.configs || []).find(c => c.is_active)
+    if (active) applyConfigToForm(active)
+    msg.value = `✓ 已切换到「${name}」，即刻生效`
+    emit('saved', { configured: true, name: active?.name, model_name: active?.model_name })
+  } catch (e) {
+    error.value = e?.response?.data?.detail || '切换失败'
+  }
+}
 
-onMounted(() => {
-  if (props.show) loadConfig()
-})
+async function doDeleteOne(name) {
+  if (!confirm(`确定删除配置「${name}」吗？其 API Key 将一并清除。`)) return
+  error.value = ''
+  msg.value = ''
+  try {
+    const res = await deleteUserLLMConfig(name)
+    configs.value = res.configs || []
+    if (editingName.value === name) resetForm()
+    const active = (res.configs || []).find(c => c.is_active)
+    if (active) applyConfigToForm(active)
+    else resetForm()
+    msg.value = `✓ 已删除「${name}」`
+    emit('saved', { configured: configs.value.length > 0 })
+  } catch (e) {
+    error.value = e?.response?.data?.detail || '删除失败'
+  }
+}
 
 function cleanBaseUrl(url) {
   if (!url) return ''
@@ -166,7 +236,7 @@ async function doTest() {
 }
 
 async function doSave() {
-  if (!form.api_key.trim() && !isConfigured.value) {
+  if (!form.api_key.trim() && !maskedKey.value) {
     error.value = 'API 密钥 (API Key) 不能为空'
     return
   }
@@ -180,24 +250,25 @@ async function doSave() {
 
   const cleanedUrl = cleanBaseUrl(form.base_url)
   form.base_url = cleanedUrl
+  const name = form.name.trim() || (providerOf(form.provider)?.name.split(' (')[0] + '·' + form.model_name.trim())
 
   try {
-    await saveUserLLMConfig({
+    const res = await saveUserLLMConfig({
+      name,
       provider: form.provider,
       model_name: form.model_name.trim(),
       api_key: form.api_key.trim() || maskedKey.value,
       base_url: cleanedUrl,
-      is_active: form.is_active
+      is_active: 1
     })
-    msg.value = '✓ 模型配置已成功保存并立即生效'
-    emit('saved', {
-      configured: true,
-      provider: form.provider,
-      model_name: form.model_name.trim()
-    })
-    setTimeout(() => {
-      emit('close')
-    }, 1000)
+    configs.value = res.configs || []
+    editingName.value = name
+    form.name = name
+    maskedKey.value = (res.configs || []).find(c => c.name === name)?.api_key_masked || ''
+    form.api_key = ''
+    msg.value = '✓ 配置已保存并启用。额度用完时，可回来一键切换另一套。'
+    const active = (res.configs || []).find(c => c.is_active)
+    emit('saved', { configured: true, name, model_name: active?.model_name })
   } catch (e) {
     error.value = e?.response?.data?.detail || '保存配置失败'
   } finally {
@@ -206,20 +277,16 @@ async function doSave() {
 }
 
 async function doReset() {
-  if (!confirm('确定要恢复系统全局默认模型吗？此操作将清除您当前账号保存的 API 密钥。')) return
+  if (!confirm('确定清空全部已保存的模型配置吗？所有 API Key 将被删除，回到系统默认模型。')) return
   saving.value = true
   error.value = ''
   msg.value = ''
   try {
     await deleteUserLLMConfig()
-    msg.value = '✓ 已恢复系统全局默认配置'
-    isConfigured.value = false
-    maskedKey.value = ''
-    form.api_key = ''
+    configs.value = []
+    resetForm()
+    msg.value = '✓ 已清空全部配置，恢复系统默认'
     emit('saved', { configured: false })
-    setTimeout(() => {
-      emit('close')
-    }, 1000)
   } catch (e) {
     error.value = e?.response?.data?.detail || '重置失败'
   } finally {
@@ -242,7 +309,7 @@ async function doReset() {
           <span class="text-2xl font-black">⚙️</span>
           <div>
             <h3 class="text-base font-black font-neo-title uppercase text-[#FFE600]">自定义大模型与 API 配置</h3>
-            <p class="text-xs font-bold text-neutral-400">Bring Your Own Key (BYOK) · 独立账号隔离存储</p>
+            <p class="text-xs font-bold text-neutral-400">可保存多套配置，额度用完一键切换</p>
           </div>
         </div>
         <button @click="emit('close')" class="neo-badge bg-[#FF3399] text-white cursor-pointer">✕</button>
@@ -254,15 +321,72 @@ async function doReset() {
         <div class="p-3.5 bg-[#FFFDE6] border-2 border-black flex items-start gap-2.5 text-xs text-black shadow-[3px_3px_0px_0px_#000]">
           <span class="text-base shrink-0">🔒</span>
           <div class="font-bold">
-            <span class="font-black bg-[#FFE600] px-1">严格物理隔离：</span>您的 API Key 与接口配置仅与当前账号绑定，加密存储，其他用户绝对无法查看或调用您的密钥。
+            <span class="font-black bg-[#FFE600] px-1">严格物理隔离：</span>您的 API Key 与接口配置仅与当前账号绑定，加密存储，其他用户无法查看或调用。
           </div>
         </div>
 
-        <!-- 1. 服务商选择 -->
+        <!-- 已保存配置列表 -->
+        <div v-if="configs.length > 0">
+          <label class="block text-xs font-black uppercase text-black mb-1.5">已保存配置（点「启用」即时切换）</label>
+          <div class="space-y-2">
+            <div
+              v-for="c in configs"
+              :key="c.name"
+              :class="[
+                'p-3 border-2 flex items-center justify-between gap-2',
+                c.is_active ? 'bg-[#FFFDE6] border-black shadow-[3px_3px_0px_0px_#000]' : 'bg-white border-black'
+              ]"
+            >
+              <div class="min-w-0">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span class="text-xs font-black text-black truncate">{{ c.name }}</span>
+                  <span v-if="c.is_active" class="neo-badge bg-[#CCFF00] text-black text-[10px] shrink-0">✓ 使用中</span>
+                </div>
+                <div class="text-[11px] font-bold text-neutral-500 font-mono truncate">
+                  {{ c.model_name }} · {{ c.base_url || '默认端点' }} · Key {{ c.api_key_masked }}
+                </div>
+              </div>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <button
+                  v-if="!c.is_active"
+                  type="button"
+                  @click="doActivate(c.name)"
+                  class="neo-btn bg-[#CCFF00] text-black text-[11px] px-2 py-1 font-black border-2"
+                >启用</button>
+                <button
+                  type="button"
+                  @click="applyConfigToForm(c)"
+                  class="neo-btn bg-white text-black text-[11px] px-2 py-1 font-black border-2"
+                >编辑</button>
+                <button
+                  type="button"
+                  @click="doDeleteOne(c.name)"
+                  class="neo-btn bg-[#FF3399] text-white text-[11px] px-2 py-1 font-black border-2"
+                >删除</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 1. 配置名称 -->
+        <div>
+          <label class="block text-xs font-black uppercase text-black mb-1.5">
+            配置名称 (Name)
+            <span class="text-neutral-500 normal-case font-bold">—— 建议按用途起名，如「DeepSeek 主力」「GLM 备用」</span>
+          </label>
+          <input
+            v-model="form.name"
+            type="text"
+            :placeholder="editingName ? '保持原名即覆盖保存' : '留空则自动以 服务商·模型 命名'"
+            class="neo-input text-sm"
+          />
+        </div>
+
+        <!-- 2. 服务商选择 -->
         <div>
           <label class="block text-xs font-black uppercase text-black mb-1.5">选择模型服务商 (Provider)</label>
-          <select 
-            v-model="form.provider" 
+          <select
+            v-model="form.provider"
             @change="onProviderChange"
             class="neo-input text-sm cursor-pointer"
           >
@@ -271,40 +395,47 @@ async function doReset() {
             </option>
           </select>
           <p class="text-[11px] font-bold text-neutral-500 mt-1">
-            {{ PROVIDERS.find(p => p.id === form.provider)?.hint }}
+            {{ providerOf(form.provider)?.hint }}
+            <a
+              v-if="providerOf(form.provider)?.keyUrl"
+              :href="providerOf(form.provider)?.keyUrl"
+              target="_blank"
+              rel="noopener"
+              class="text-black underline font-black ml-1"
+            >未申请 Key？去开放平台申请 ↗</a>
           </p>
         </div>
 
-        <!-- 2. Base URL -->
+        <!-- 3. Base URL -->
         <div>
           <div class="flex items-center justify-between mb-1.5">
             <label class="text-xs font-black uppercase text-black">接口基地址 (Base URL)</label>
             <span class="text-[11px] font-bold text-neutral-500">须兼容 OpenAI 格式</span>
           </div>
-          <input 
-            v-model="form.base_url" 
-            type="text" 
+          <input
+            v-model="form.base_url"
+            type="text"
             placeholder="例如：https://api.deepseek.com/v1"
             class="neo-input text-sm font-mono"
           />
         </div>
 
-        <!-- 3. API Key -->
+        <!-- 4. API Key -->
         <div>
           <div class="flex items-center justify-between mb-1.5">
             <label class="text-xs font-black uppercase text-black">API 密钥 (API Key)</label>
-            <span v-if="isConfigured && maskedKey" class="neo-badge bg-[#CCFF00] text-black text-[10px]">
+            <span v-if="maskedKey" class="neo-badge bg-[#CCFF00] text-black text-[10px]">
               已保存：<span class="font-mono">{{ maskedKey }}</span>
             </span>
           </div>
           <div class="relative">
-            <input 
-              v-model="form.api_key" 
-              :type="showPassword ? 'text' : 'password'" 
-              :placeholder="isConfigured ? '留空表示沿用已保存的密钥，输入新内容则更新' : '粘贴您的 sk-****** 密钥'"
+            <input
+              v-model="form.api_key"
+              :type="showPassword ? 'text' : 'password'"
+              :placeholder="maskedKey ? '留空表示沿用已保存的密钥，输入新内容则更新' : '粘贴您的 sk-****** 密钥'"
               class="neo-input text-sm font-mono pr-16"
             />
-            <button 
+            <button
               type="button"
               @click="showPassword = !showPassword"
               class="absolute right-2.5 top-2.5 neo-badge bg-black text-white text-[10px] cursor-pointer"
@@ -314,12 +445,12 @@ async function doReset() {
           </div>
         </div>
 
-        <!-- 4. 模型名称 -->
+        <!-- 5. 模型名称 -->
         <div>
           <label class="block text-xs font-black uppercase text-black mb-1.5">模型标识 (Model Name)</label>
-          <input 
-            v-model="form.model_name" 
-            type="text" 
+          <input
+            v-model="form.model_name"
+            type="text"
             placeholder="例如：deepseek-chat 或 qwen-plus"
             class="neo-input text-sm font-mono"
           />
@@ -327,7 +458,7 @@ async function doReset() {
           <div class="flex flex-wrap items-center gap-1.5 mt-2">
             <span class="text-[11px] font-black text-neutral-500">常用模型：</span>
             <button
-              v-for="m in PROVIDERS.find(p => p.id === form.provider)?.models || []"
+              v-for="m in providerOf(form.provider)?.models || []"
               :key="m"
               type="button"
               @click="selectModel(m)"
@@ -373,13 +504,13 @@ async function doReset() {
         <!-- 底部按钮操作栏 -->
         <div class="pt-4 border-t-2 border-black flex items-center justify-between gap-3">
           <button
-            v-if="isConfigured"
+            v-if="configs.length > 0"
             type="button"
             @click="doReset"
             :disabled="saving || testing"
             class="neo-btn bg-[#FF3399] hover:bg-[#F43F5E] text-white text-xs px-3.5 py-2 font-black shadow-[2px_2px_0px_0px_#000]"
           >
-            恢复默认
+            清空全部
           </button>
           <div v-else></div>
 
@@ -400,7 +531,7 @@ async function doReset() {
               class="neo-btn bg-[#FFE600] hover:bg-[#FFF066] text-black text-xs px-5 py-2 font-black border-[3px] shadow-[3px_3px_0px_0px_#000]"
             >
               <span v-if="saving" class="animate-spin text-sm">⏳</span>
-              <span>{{ saving ? '保存中…' : '💾 保存并生效' }}</span>
+              <span>{{ saving ? '保存中…' : '💾 保存并启用' }}</span>
             </button>
           </div>
         </div>

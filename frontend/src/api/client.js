@@ -105,14 +105,19 @@ export function getUserLLMConfig() {
   return http.get('/user/llm_config').then((r) => r.data)
 }
 
-/** 保存或更新用户自定义 LLM 配置 */
+/** 保存或更新用户自定义 LLM 配置（同名覆盖，带 name 支持多套配置） */
 export function saveUserLLMConfig(payload) {
   return http.post('/user/llm_config', payload).then((r) => r.data)
 }
 
-/** 清除用户自定义 LLM 配置（恢复系统默认） */
-export function deleteUserLLMConfig() {
-  return http.delete('/user/llm_config').then((r) => r.data)
+/** 切换激活的模型配置（额度用完换另一套） */
+export function activateUserLLMConfig(name) {
+  return http.post('/user/llm_config/activate', { name }).then((r) => r.data)
+}
+
+/** 删除用户自定义 LLM 配置：带 name 删单套，不带 name 清空全部（恢复默认） */
+export function deleteUserLLMConfig(name) {
+  return http.delete('/user/llm_config', { params: name ? { name } : {} }).then((r) => r.data)
 }
 
 /** 测试 LLM 模型连接 */

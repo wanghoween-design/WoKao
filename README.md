@@ -66,9 +66,11 @@ API Key 没配、额度用完、JSON 被截断，都会落到同一个兜底内�
 
 点击任意任务卡后发起对话，导师会带上「第几周、周几、几点到几点、量化指标」这段上下文。可以要它拆考点、出两三道题，也可以说「今天加班太累，挪到周末补」，它会给出重排建议并触发日程重构。
 
-### Key 自带，数据隔离
+### Key 自带，可存多套随时切换
 
-BYOK：每个账号在设置里填自己的 API Key，任意 OpenAI 兼容端点都能用（DeepSeek、智谱、通义、GPT）。Key 用 Fernet 加密存本机，密钥文件不进仓库。注册和登录接口有限流。
+BYOK：每个账号在设置里填自己的 API Key，任意 OpenAI 兼容端点都能用。内置 DeepSeek、通义千问、智谱 GLM、豆包（火山方舟）、硅基流动、OpenAI 的 Base URL 预设和常用模型名，也支持自定义接口；每个预置都带了申请 Key 的入口链接。
+
+可以给同一账号存多套配置（比如「DeepSeek 主力」「GLM 备用」），哪家的额度用完了，在设置里点一下「启用」就切过去，生成和 AI 导师即刻换模型。Key 用 Fernet 加密存本机，账号之间数据隔离，注册和登录接口有限流。
 
 ## 系统架构
 
@@ -156,7 +158,8 @@ OPENAI_MODEL = "gpt-4o-mini"
 | 导出 | `GET` | `/api/plans/{id}/export.ics` | 导出 iCalendar（内嵌时区） |
 | | `GET` | `/api/plans/{id}/export.md` | 导出 Markdown 全文 |
 | AI 导师 | `POST` | `/api/agent/chat` | 导师对话（上下文感知） |
-| 自定义模型 | `GET/POST/DELETE` | `/api/user/llm_config` | BYOK 配置（加密存储） |
+| 自定义模型 | `GET/POST/DELETE` | `/api/user/llm_config` | BYOK 多套配置（加密存储，同名覆盖） |
+| | `POST` | `/api/user/llm_config/activate` | 一键切换启用的配置 |
 | | `POST` | `/api/user/llm_config/test` | 连通性测试 |
 | 考情检索 | `POST` | `/api/search_exam_info` | 搜索优先检索（带来源与置信度） |
 
@@ -173,6 +176,10 @@ pytest tests/ -v
 **生成方案时提示「由系统内置排程引擎直接产出」是怎么回事？**
 
 模型调用依赖 BYOK 的 API Key。Key 没配、额度耗尽（403 insufficient_quota）或网络不通时，系统降级为确定性引擎，用兜底内容池出方案。日程结构和约束保证不受影响，恢复 Key 后重新生成即可拿到个性化任务内容。
+
+**一个模型的额度用完了怎么办？**
+
+设置里可以给同一账号保存多套模型配置（内置 GLM、DeepSeek、通义千问、豆包、硅基流动等常见厂商的 Base URL 预设），点「启用」即刻切换到另一家，不用重新填 Key。
 
 **8000 端口被占用？**
 

@@ -455,46 +455,106 @@ def update_user_profile(user_id: int, profile: Dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def get_user_llm_config(user_id: int) -> Optional[Dict[str, Any]]:
-    """获取用户自定义 LLM 配置（api_key 读取时自动解密为明文）。"""
+def _llm_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    """行 → 配置 dict，api_key 自动解密为明文。"""
+    d = dict(row)
+    if d.get("api_key"):
+        d["api_key"] = decrypt_secret(d["api_key"])
+    return d
+
+
+def list_user_llm_configs(user_id: int) -> List[Dict[str, Any]]:
+    """列出用户全部模型配置（api_key 已解密，路由层负责脱敏），激活的排最前。"""
     conn = get_connection()
     try:
-        row = conn.execute("SELECT * FROM user_llm_configs WHERE user_id = ?", (user_id,)).fetchone()
-        if not row:
-            return None
-        d = dict(row)
-        if d.get("api_key"):
-            d["api_key"] = decrypt_secret(d["api_key"])
-        return d
+        rows = conn.execute(
+            """
+            SELECT * FROM user_llm_configs WHERE user_id = ?
+            ORDER BY is_active DESC, updated_at DESC, id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        return [_llm_row_to_dict(r) for r in rows]
     finally:
         conn.close()
 
 
+def get_user_llm_config(user_id: int) -> Optional[Dict[str, Any]]:
+    """获取用户当前激活的模型配置（api_key 已解密；无配置返回 None）。
+
+    兼容旧调用方（planner / coach / search 经 get_effective_user_llm_config 使用）。
+    """
+    configs = list_user_llm_configs(user_id)
+    for cfg in configs:
+        if cfg.get("is_active"):
+            return cfg
+    return configs[0] if configs else None
+
+
 def save_user_llm_config(
     user_id: int,
+    name: str,
     provider: str,
     model_name: str,
     api_key: str,
     base_url: str = "",
     is_active: int = 1,
 ) -> bool:
-    """保存用户自定义 LLM 配置（api_key 静态加密后落库）。"""
+    """按 (user_id, name) 保存一套模型配置（api_key 加密落库）；is_active=1 时独占激活。"""
+    name = (name or "").strip() or f"{provider}·{model_name}"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO user_llm_configs
+                (user_id, name, provider, model_name, api_key, base_url, is_active, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
+            ON CONFLICT (user_id, name) DO UPDATE SET
+                provider = excluded.provider,
+                model_name = excluded.model_name,
+                api_key = excluded.api_key,
+                base_url = excluded.base_url,
+                updated_at = datetime('now')
+            """,
+            (user_id, name, provider, model_name, encrypt_secret(api_key), base_url.strip()),
+        )
+        if is_active:
+            conn.execute("UPDATE user_llm_configs SET is_active = 0 WHERE user_id = ?", (user_id,))
+            conn.execute(
+                "UPDATE user_llm_configs SET is_active = 1 WHERE user_id = ? AND name = ?",
+                (user_id, name),
+            )
+        else:
+            # 若用户此前没有任何配置，首套无论如何都要激活
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM user_llm_configs WHERE user_id = ?", (user_id,)
+            ).fetchone()["n"]
+            has_active = conn.execute(
+                "SELECT COUNT(*) AS n FROM user_llm_configs WHERE user_id = ? AND is_active = 1",
+                (user_id,),
+            ).fetchone()["n"]
+            if count and not has_active:
+                conn.execute(
+                    "UPDATE user_llm_configs SET is_active = 1 WHERE user_id = ? AND name = ?",
+                    (user_id, name),
+                )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def activate_user_llm_config(user_id: int, name: str) -> bool:
+    """切换激活配置：目标套激活，其余取消。"""
     conn = get_connection()
     try:
         cur = conn.execute(
-            """
-            INSERT OR REPLACE INTO user_llm_configs
-                (user_id, provider, model_name, api_key, base_url, is_active, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-            """,
-            (
-                user_id,
-                provider,
-                model_name,
-                encrypt_secret(api_key),
-                base_url.strip(),
-                is_active,
-            ),
+            "UPDATE user_llm_configs SET is_active = 0 WHERE user_id = ?", (user_id,)
+        )
+        cur = conn.execute(
+            "UPDATE user_llm_configs SET is_active = 1, updated_at = datetime('now') "
+            "WHERE user_id = ? AND name = ?",
+            (user_id, name),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -502,11 +562,36 @@ def save_user_llm_config(
         conn.close()
 
 
-def delete_user_llm_config(user_id: int) -> bool:
-    """删除用户自定义 LLM 配置。"""
+def delete_user_llm_config(user_id: int, name: Optional[str] = None) -> bool:
+    """删除模型配置：name 为 None 时清空全部（恢复系统默认）。
+
+    若删掉的是激活套且还有剩余配置，自动启用最近更新的一套，保证始终有激活项。
+    """
     conn = get_connection()
     try:
-        cur = conn.execute("DELETE FROM user_llm_configs WHERE user_id = ?", (user_id,))
+        if name is None:
+            cur = conn.execute("DELETE FROM user_llm_configs WHERE user_id = ?", (user_id,))
+        else:
+            cur = conn.execute(
+                "DELETE FROM user_llm_configs WHERE user_id = ? AND name = ?", (user_id, name)
+            )
+        if cur.rowcount > 0:
+            remaining = conn.execute(
+                """
+                SELECT name FROM user_llm_configs WHERE user_id = ?
+                ORDER BY is_active DESC, updated_at DESC, id DESC LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            has_active = conn.execute(
+                "SELECT COUNT(*) AS n FROM user_llm_configs WHERE user_id = ? AND is_active = 1",
+                (user_id,),
+            ).fetchone()["n"]
+            if remaining and not has_active:
+                conn.execute(
+                    "UPDATE user_llm_configs SET is_active = 1 WHERE user_id = ? AND name = ?",
+                    (user_id, remaining["name"]),
+                )
         conn.commit()
         return cur.rowcount > 0
     finally:

@@ -171,3 +171,21 @@
   11. README 重写为风趣版（版本徽章/用例数/架构树/API 表/FAQ 全部与代码事实核对）。
 - **验证结果**：pytest 34/34 通过；compileall 零错误；`import server` 正常；
   前端重建成功（dist 晚于全部 src 修改）。
+
+## [2026-10-05 01:30] BYOK 多模型配置：一人多套、一键切换、常见厂商预置
+
+- **需求**：前端可随时更改所选大模型的 Base URL 与 API Key；一个模型额度用完可切换到
+  另一套；内置 GLM、DeepSeek、通义千问、豆包等常见厂商预设与自定义。
+- **实现**：
+  1. 表重建：user_llm_configs 从 user_id 单主键改为 (user_id, name) 唯一的多行结构，
+     init_db 自动检测旧格式并迁移（原配置保留为「<provider> 配置」且保持激活）；
+  2. crud：save（同名覆盖 + 保存即独占激活 + 首套强制激活）、activate（独占切换）、
+     delete（单删/清空，删激活套后自动补位激活最近一套）、list（激活优先排序）；
+     get_user_llm_config 兼容旧调用方，始终返回激活套；
+  3. 路由：GET 返回 {configured, config, configs}（全量脱敏）；POST 支持 name（缺省自动
+     「provider·model」命名）与掩码 Key 沿用；新增 POST /api/user/llm_config/activate；
+  4. 前端弹窗：已保存配置列表（使用中徽标 / 启用 / 编辑 / 删除）、配置名称输入、
+     新增豆包（火山方舟）预设、每个预设带申请 Key 入口链接、智谱模型补充 glm-5.2；
+  5. 测试：新增多配置切换/单删补位/自动命名/掩码沿用/旧表迁移用例（34→37）。
+- **验证结果**：pytest 37/37 通过；真实 uvicorn 服务端到端（保存两套→自动切换→一键切回→
+  GET 兼容形状→单删补位）全部通过；前端重建成功。
