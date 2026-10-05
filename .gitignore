@@ -1,0 +1,114 @@
+# ==============================================================================
+# WoKao-ExamAgent .gitignore
+# ==============================================================================
+
+# ---- 密钥、凭证与本地配置（切勿提交）----
+config.toml
+config.json
+config.*.toml
+config.*.json
+secrets*.json
+.env
+.env.*
+.env.local
+!.env.example
+!config.example.toml
+!config.example.json
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.token
+*credentials*
+*credential*
+
+# ---- 数据库与数据转储（本地 SQLite 含真实用户数据）----
+wokao.db
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sql
+*.sql.gz
+*.dump
+data/
+
+# ---- Python ----
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+pip-wheel-metadata/
+
+# ---- Node / 前端 ----
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+frontend/.vite/
+.vite/
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.yarn/
+
+# ---- 测试与覆盖率产物 ----
+test-results/
+playwright-report/
+*.lcov
+
+# ---- 运行日志与临时文件 ----
+*.log
+logs/
+*.jsonl
+*.tmp
+*.temp
+*.bak
+*.orig
+*.swp
+*.swo
+scratch/
+brain/
+history/
+
+# ---- Playwright 本地浏览器（policy_search 兜底渲染用）----
+.pw-browsers/
+.playwright/
+
+# ---- AI 助手工作目录 ----
+.gemini/
+.antigravity/
+.agent/
+.agents/
+.claude/
+.cursor/
+.aider*
+
+# ---- 编辑器与操作系统 ----
+.idea/
+.vscode/
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
